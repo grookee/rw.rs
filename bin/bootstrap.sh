@@ -18,12 +18,12 @@ if [ -z "${RWRS_SKIP_APT+x}" ]; then
     apt-get -y --allow-releaseinfo-change update
     DEBIAN_FRONTEND=noninteractive \
     apt install -yq build-essential libtool libtool-bin sudo quota net-tools \
-        curl git zsh vim emacs nano mle screen tmux irssi weechat \
-        subversion libxml2-dev libpcre3-dev strace gdb socat sqlite3 \
+        curl git zsh vim emacs nano mle ed screen tmux irssi weechat \
+        subversion libxml2-dev libpcre2-dev strace gdb socat sqlite3 \
         libsqlite3-dev fish mosh stow re2c bison libssl-dev pkg-config \
         zlib1g-dev libreadline-dev libgd-dev libfreetype6-dev libwebp-dev \
-        libonig-dev lua5.3 liblua5.3-dev libffi-dev bind9-dnsutils cmake \
-        ca-certificates debian-archive-keyring snapd rsync
+        libonig-dev lua5.4 liblua5.4-dev libffi-dev bind9-dnsutils cmake \
+        ca-certificates debian-archive-keyring snapd rsync unattended-upgrades python3.13-venv
     systemctl daemon-reexec
     logger -t $log_ns "ran apt updates"
 fi
@@ -125,22 +125,32 @@ if [ ! -h "$php_ini_path" ]; then
 fi
 
 # install ssl certs (not in test env)
-if [ ! -f /etc/ssl/private/rwrs_priv.pem -a -z "${RWRS_TEST+x}" ]; then
+if [ -z "${RWRS_TEST+x}" ]; then
     # install certbot
-    snap install core
-    snap refresh core
-    snap install --classic certbot
-    ln -s /snap/bin/certbot /usr/bin/certbot
+    if ! command -v certbot &>/dev/null; then
+        snap install core
+        snap refresh core
+        snap install --classic certbot
+        ln -sfv /snap/bin/certbot /usr/bin/certbot
+    fi
 
-    # request cert
-    certbot certonly --non-interactive --manual \
-        --agree-tos --email=rwrs@protonmail.com --domains=rw.rs \
-        --manual-auth-hook=$rwrs_root/bin/certbot_hook.sh \
-        --manual-cleanup-hook=$rwrs_root/bin/certbot_clean.sh
-
-    # symlink
-    ln -s /etc/letsencrypt/live/rw.rs/fullchain.pem /etc/ssl/certs/rwrs_chain.pem
-    ln -s /etc/letsencrypt/live/rw.rs/privkey.pem   /etc/ssl/private/rwrs_priv.pem
+    # request cert if not present or expired
+    if $rwrs_root/bin/certbot_is_expired.sh; then
+        logger -t $log_ns "cert expired"
+        certbot certonly \
+            --non-interactive \
+            --manual \
+            --agree-tos \
+            --email=rwrs@protonmail.com \
+            --domains=rw.rs \
+            --preferred-challenges http \
+            --manual-auth-hook=$rwrs_root/bin/certbot_hook.sh \
+            --manual-cleanup-hook=$rwrs_root/bin/certbot_clean.sh
+        ln -sfv /etc/letsencrypt/live/rw.rs/fullchain.pem $cert_full
+        ln -sfv /etc/letsencrypt/live/rw.rs/privkey.pem   $cert_priv
+        systemctl restart httpd
+        logger -t $log_ns "cert updated"
+    fi
 fi
 
 # configure apache
@@ -150,7 +160,7 @@ then
     cp -vf "$rwrs_root/etc/httpd.service" /etc/systemd/system/
     cp -vf "$rwrs_root/etc/httpd.conf" $httpd_root/conf/
     rm -rf $htdocs_root
-    ln -s "$rwrs_root/htdocs" $htdocs_root
+    ln -sfv "$rwrs_root/htdocs" $htdocs_root
     systemctl daemon-reload
     if systemctl is-active httpd; then
         systemctl reload httpd
@@ -193,20 +203,6 @@ then
     logger -t $log_ns "recompiled crawdb"
 fi
 
-# make robot user
-if ! id -u robot 2>/dev/null; then
-    groupadd robot
-    useradd -r -m -d /home/robot -s /bin/bash -g robot robot
-    logger -t $log_ns "created robot user"
-fi
-
-# add robot sudoers entry
-if ! [ -f /etc/sudoers.d/rwrs_robot ]; then
-    echo 'robot ALL=(root:root) NOPASSWD: /opt/rw.rs/bin/robot_as_root.sh' \
-        >/etc/sudoers.d/rwrs_robot
-    logger -t $log_ns "created robot sudoer rule"
-fi
-
 # create mosh group
 groupadd -f mosh
 
@@ -225,4 +221,3 @@ fi
 
 # manually configured items:
 #   /usr/httpd/conf/secrets.conf
-#   /home/robot/.ssh
